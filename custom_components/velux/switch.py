@@ -147,9 +147,9 @@ class VeluxHeartbeat(SwitchEntity):
         """Return true if on."""
         return not self.pyvlx.heartbeat.stopped
 
-    def turn_on(self, **kwargs: Any) -> None:
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the switch on."""
-        self.pyvlx.heartbeat.start()
+        await self.pyvlx.heartbeat.start()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the switch off."""

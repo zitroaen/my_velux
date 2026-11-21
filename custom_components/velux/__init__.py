@@ -11,8 +11,12 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.typing import ConfigType
 from pyvlx import PyVLX
+from pyvlx.exception import PyVLXException
 
 from .const import DOMAIN, LOGGER, PLATFORMS
+from .pyvlx_patches import apply_pyvlx_patches
+
+apply_pyvlx_patches()
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -26,8 +30,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     pyvlx: PyVLX = PyVLX(**pyvlx_args)
     try:
         await pyvlx.connect()
-    except OSError as ex:
+    except (OSError, PyVLXException) as ex:
         LOGGER.warning("Unable to connect to KLF200: %s", str(ex))
+        if pyvlx.connection.transport is not None:
+            pyvlx.connection.disconnect()
         raise ConfigEntryNotReady from ex
 
     # Store pyvlx in hass data
