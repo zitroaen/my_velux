@@ -1,5 +1,6 @@
 """Config flow for Velux integration."""
 
+import asyncio
 from typing import Any
 
 from pyvlx import PyVLX, PyVLXException
@@ -35,15 +36,40 @@ async def _check_connection(host: str, password: str) -> dict[str, Any]:
     pyvlx = PyVLX(host=host, password=password)
     try:
         await pyvlx.connect()
-        await pyvlx.disconnect()
     except (PyVLXException, ConnectionError) as err:
         LOGGER.debug("Cannot connect: %s", err)
+        if "Login to KLF 200 failed" in str(err):
+            return {"base": "invalid_auth"}
         return {"base": "cannot_connect"}
     except Exception as err:  # noqa: BLE001
         LOGGER.exception("Unexpected exception: %s", err)
         return {"base": "unknown"}
+    finally:
+        await _close_test_connection(pyvlx)
 
     return {}
+
+
+async def _close_test_connection(pyvlx: PyVLX) -> None:
+    """Close the test connection cleanly, without rebooting the KLF 200.
+
+    pyvlx.disconnect() reboots the gateway, so the entry setup that follows a
+    successful check would hit a rebooting KLF 200. After a failed login the
+    TLS session was left open and blocked the next attempt. Both are avoided
+    here: stop the heartbeat, switch off the house status monitor if it is
+    on, and always close the socket.
+    """
+    try:
+        await pyvlx.heartbeat.stop()
+        if pyvlx.connection.connected and pyvlx.klf200.house_status_monitor_enabled:
+            await pyvlx.klf200.house_status_monitor_disable(pyvlx=pyvlx, timeout=5)
+    except (PyVLXException, OSError) as err:
+        LOGGER.debug("Cleanup of test connection failed: %s", err)
+    finally:
+        if pyvlx.connection.transport is not None or pyvlx.connection.connected:
+            pyvlx.connection.disconnect()
+        if pyvlx.connection.tasks:
+            await asyncio.gather(*pyvlx.connection.tasks, return_exceptions=True)
 
 
 class VeluxConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore
