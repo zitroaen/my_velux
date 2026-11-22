@@ -11,6 +11,7 @@ from homeassistant.components import zeroconf
 from homeassistant.config_entries import ConfigEntryState, ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_MAC, CONF_NAME, CONF_PASSWORD
 import homeassistant.helpers.config_validation as cv
+from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.selector import (
     SelectSelector,
@@ -72,6 +73,21 @@ async def _close_test_connection(pyvlx: PyVLX) -> None:
             await asyncio.gather(*pyvlx.connection.tasks, return_exceptions=True)
 
 
+def _normalize_name(hostname: str) -> str:
+    """Return the KLF 200 name in one consistent form.
+
+    The KLF 200 reports its hostname via zeroconf with a "LAN_" prefix
+    (VELUX_KLF_LAN_345B.local.), via DHCP without it (velux_klf_345b).
+    Both have to result in the same unique_id, otherwise an already
+    configured gateway is offered again as newly discovered.
+    """
+    name = hostname.upper()
+    for suffix in ("._HTTP._TCP.LOCAL.", ".LOCAL.", ".LOCAL"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+    return name.replace("LAN_", "")
+
+
 class VeluxConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore
     """Handle a config flow for velux."""
 
@@ -94,7 +110,7 @@ class VeluxConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore
             if self.hosts:
                 for host in self.hosts:
                     if user_input[CONF_HOST] == host.ip_address:
-                        await self.async_set_unique_id(host.hostname.replace("LAN_", ""))
+                        await self.async_set_unique_id(_normalize_name(host.hostname))
                         self._abort_if_unique_id_configured(
                             updates={CONF_HOST: host.ip_address}
                         )
@@ -135,6 +151,23 @@ class VeluxConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore
             errors=errors,
         )
 
+    def _abort_if_known_gateway(self, name: str, host: str) -> None:
+        """Abort if the gateway is already configured under any name variant.
+
+        Older versions stored the unique_id with or without the "LAN_" prefix
+        depending on how the entry was created. The stored unique_id is not
+        rewritten, because entity and device ids are derived from it.
+        """
+        for entry in self.hass.config_entries.async_entries(
+            DOMAIN, include_ignore=True
+        ):
+            if entry.unique_id and _normalize_name(entry.unique_id) == name:
+                if entry.data.get(CONF_HOST) not in (None, host):
+                    self.hass.config_entries.async_update_entry(
+                        entry=entry, data={**entry.data, CONF_HOST: host}
+                    )
+                raise AbortFlow("already_configured")
+
     async def async_step_unignore(self, user_input: dict[str, Any]) -> ConfigFlowResult:
         """Rediscover a previously ignored discover."""
         unique_id = user_input["unique_id"]
@@ -145,8 +178,11 @@ class VeluxConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore
         self, discovery_info: ZeroconfServiceInfo
     ) -> ConfigFlowResult:
         """Handle discovery by zeroconf."""
-        self.discovery_data[CONF_NAME] = discovery_info.hostname.replace(".local.", "")
+        self.discovery_data[CONF_NAME] = _normalize_name(discovery_info.hostname)
         self.discovery_data[CONF_HOST] = discovery_info.host
+        self._abort_if_known_gateway(
+            self.discovery_data[CONF_NAME], self.discovery_data[CONF_HOST]
+        )
         await self.async_set_unique_id(self.discovery_data[CONF_NAME])
         self._abort_if_unique_id_configured(
             updates={CONF_HOST: self.discovery_data[CONF_HOST]}
@@ -171,8 +207,11 @@ class VeluxConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore
         # The hostname ends with the last 4 digits of the device MAC address.
         self.discovery_data[CONF_HOST] = discovery_info.ip
         self.discovery_data[CONF_MAC] = format_mac(discovery_info.macaddress)
-        self.discovery_data[CONF_NAME] = discovery_info.hostname.upper().replace("LAN_", "")
+        self.discovery_data[CONF_NAME] = _normalize_name(discovery_info.hostname)
         LOGGER.debug(f"Discovered by DHCP with Info: {discovery_info}")
+        self._abort_if_known_gateway(
+            self.discovery_data[CONF_NAME], self.discovery_data[CONF_HOST]
+        )
         await self.async_set_unique_id(self.discovery_data[CONF_NAME])
         self._abort_if_unique_id_configured(
             updates={
